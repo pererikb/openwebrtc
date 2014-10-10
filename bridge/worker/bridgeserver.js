@@ -31,6 +31,8 @@ var imageServers = {};
 var imageServerBasePort = 10000 + Math.floor(Math.random() * 40000);
 var nextImageServerPort = imageServerBasePort;
 
+var connections = [];
+
 var server = new WebSocketServer(10717, "127.0.0.1");
 server.onaccept = function (event) {
     var ws = event.socket;
@@ -49,23 +51,29 @@ server.onaccept = function (event) {
 
     var rpcScope = {};
     var jsonRpc = new JsonRpc(channel, {"scope": rpcScope, "noRemoteExceptions": true});
-    var peerHandlers = [];
-    var renderControllers = [];
+    var connection = {
+        "origin": event.origin,
+        "peerHandlers": [],
+        "renderControllers": []
+    };
+    connections.push(connection);
 
     ws.onclose = function (event) {
         var i;
-        for (i = 0; i < renderControllers.length; i++) {
-            renderControllers[i].stop();
-            jsonRpc.removeObjectRef(renderControllers[i]);
-            delete renderControllers[i];
+        for (i = 0; i < connection.renderControllers.length; i++) {
+            connection.renderControllers[i].stop();
+            jsonRpc.removeObjectRef(connection.renderControllers[i]);
+            delete connection.renderControllers[i];
         }
-        renderControllers = null;
-        for (i = 0; i < peerHandlers.length; i++) {
-            peerHandlers[i].stop();
-            jsonRpc.removeObjectRef(peerHandlers[i]);
-            delete peerHandlers[i];
+        connection.renderControllers = null;
+        for (i = 0; i < connection.peerHandlers.length; i++) {
+            connection.peerHandlers[i].stop();
+            jsonRpc.removeObjectRef(connection.peerHandlers[i]);
+            delete connection.peerHandlers[i];
         }
-        peerHandlers = null;
+        connection.peerHandlers = null;
+        connections.splice(connections.indexOf(connection), 1);
+        connection = null;
         rpcScope = null;
         jsonRpc = null;
         channel = null;
@@ -74,7 +82,7 @@ server.onaccept = function (event) {
 
     rpcScope.createPeerHandler = function (configuration, client) {
         var peerHandler = new PeerHandler(configuration, client, jsonRpc);
-        peerHandlers.push(peerHandler);
+        connection.peerHandlers.push(peerHandler);
         var exports = [ "prepareToReceive", "prepareToSend", "addRemoteCandidate" ];
         for (var i = 0; i < exports.length; i++)
             jsonRpc.exportFunctions(peerHandler[exports[i]]);
@@ -143,7 +151,7 @@ server.onaccept = function (event) {
         }
 
         var controller = new RenderController(audioRenderer, videoRenderer, imageServerPort, tag);
-        renderControllers.push(controller);
+        connection.renderControllers.push(controller);
         jsonRpc.exportFunctions(controller.setAudioMuted, controller.stop);
         var controllerRef = jsonRpc.createObjectRef(controller, "setAudioMuted", "stop");
 
@@ -173,6 +181,20 @@ function RenderController(audioRenderer, videoRenderer, imageServerPort, tag) {
 
         audioRenderer = videoRenderer = imageServerPort = null;
     };
+
+    this.hasAudio = function () { return !!audioRenderer; };
+    this.hasVideo = function () { return !!videoRenderer; };
+
+    this.getRendererDotData = function (mediaType) {
+        switch (mediaType) {
+        case "audio":
+            return audioRenderer ? audioRenderer.get_dot_data() : "";
+        case "video":
+            return videoRenderer ? videoRenderer.get_dot_data() : "";
+        default:
+            return ""
+        }
+    };
 }
 
 var owr_js = "(function () {\n" + wbjsonrpc_js + domutils_js + sdp_js + webrtc_js + "\n})();";
@@ -184,6 +206,74 @@ server.onrequest = function (event) {
         response.headers["Content-Type"] = "text/javascript";
         response.headers["Access-Control-Allow-Origin"] = "*";
         response.body = owr_js;
+    } else if (event.request.url == "/graph") {
+        response.status = 200;
+        response.headers["Content-Type"] = "text/html";
+        response.body = "<!doctype html><html><head><title>Pipeline graphs</title></head><body>";
+        for (var i = 0; i < connections.length; i++) {
+            var j, k;
+            var peerHandlers = connections[i].peerHandlers;
+            var renderControllers = connections[i].renderControllers;
+            response.body += "<h1>" + connections[i].origin + " #" + i + "</h1>";
+            response.body += "<h2>Transport</h2>";
+            for (j = 0; j < peerHandlers.length; j++) {
+                response.body += "<a href=\"/graph/" + i + "/transport/agent/" + j + "\">" +
+                    "Transport agent #" + j + "</a><br>";
+                ["Send", "Receive"].forEach(function (sourceType) {
+                    response.body += "<h3>" + sourceType + " sources</h3>";
+                    for (k = 0; k < peerHandlers[j]["numberOf" + sourceType + "Sources"](); k++) {
+                        response.body += "<a href=\"/graph/" + i + "/transport/agent/" + j +
+                            "/" + sourceType.toLowerCase() + "/source/" + k + "\">" +
+                            sourceType + " source #" + k + "</a><br>";
+                    }
+                });
+            }
+            response.body += "<h2>Rendering</h2>";
+            for (j = 0; j < renderControllers.length; j++) {
+                ["Audio", "Video"].forEach(function (mediaType) {
+                    if (renderControllers[j]["has" + mediaType]()) {
+                        response.body += "<a href=\"/graph/" + i + "/renderer/" + j +
+                            "/" + mediaType.toLowerCase() + "\">" + mediaType +
+                            " renderer #" + j + "</a><br>";
+                    }
+                });
+            }
+        }
+        response.body += "</body></html>";
+    } else if (event.request.url.substr(0, 7) == "/graph/") {
+        var dotData;
+        var parts = event.request.url.split("/");
+        var connection = connections[parseInt(parts[2])];
+        if (connection && parts[3] == "transport" && parts[4] == "agent") {
+            var peerHandler = connection.peerHandlers[parseInt(parts[5])];
+            if (peerHandler) {
+                if (parts.length < 7)
+                    dotData = peerHandler.getTransportAgentDotData();
+                else if (parts.length > 8 && parts[7] == "source") {
+                    var sourceIndex = parseInt(parts[8]);
+                    if (parts[6] == "send")
+                        dotData = peerHandler.getSendSourceDotData(sourceIndex);
+                    else if (parts[6] == "receive")
+                        dotData = peerHandler.getReceiveSourceDotData(sourceIndex);
+                }
+            }
+        } else if (connection && parts[3] == "renderer") {
+            var renderController = connection.renderControllers[parseInt(parts[4])];
+            if (renderController)
+                dotData = renderController.getRendererDotData(parts[5]);
+        }
+        response.status = 200;
+        response.headers["Content-Type"] = "text/html";
+        response.headers["Content-Security-Policy"] = "default-src 'none';" +
+            "script-src 'unsafe-inline' http://mdaines.github.io/viz.js/viz.js;" +
+            "sandbox allow-scripts;";
+        response.body = "<!doctype html><html><head><title>Pipeline graph</title>" +
+            "<meta name=\"referrer\" content=\"no-referrer\">" +
+            "<script src=\"http://mdaines.github.io/viz.js/viz.js\"></script>" +
+            "<script>window.onload = function () { document.body.innerHTML = " +
+            (dotData ? "Viz(decodeURIComponent(\"" + encodeURIComponent(dotData) +
+            "\"), \"svg\", \"dot\");" : "\"No dot data\";") +
+            " };</script></head><body><h3>Please wait..</h3></body></html>";
     } else {
         response.status = 404;
         response.headers["Content-Type"] = "text/html";

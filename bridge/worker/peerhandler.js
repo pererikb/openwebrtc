@@ -33,6 +33,7 @@ function PeerHandler(configuration, client, jsonRpc) {
     var mediaSessions = [];
     var numberOfReceivePreparedMediaSessions = 0;
     var numberOfSendPreparedMediaSessions = 0;
+    var localSources = [];
     var remoteSources = [];
 
     this.prepareToReceive = function (localSessionInfo, isInitiator) {
@@ -179,6 +180,7 @@ function PeerHandler(configuration, client, jsonRpc) {
                 });
             mediaSession.set_send_payload(sendPayload);
             mediaSession.set_send_source(mdesc.source);
+            localSources[i] = mdesc.source;
             numberOfSendPreparedMediaSessions = i + 1;
         }
     }
@@ -195,6 +197,7 @@ function PeerHandler(configuration, client, jsonRpc) {
                 delete remoteSources[i];
             }
         }
+        localSources = null;
         remoteSources = null;
         for (i = 0; i < mediaSessions.length; i++) {
             mediaSessions[i].set_send_source(null);
@@ -202,6 +205,21 @@ function PeerHandler(configuration, client, jsonRpc) {
         }
         mediaSessions = null;
         transportAgent = null;
+    };
+
+    this.numberOfSendSources = function () { return localSources.length; };
+    this.numberOfReceiveSources = function () { return remoteSources.length; };
+
+    this.getTransportAgentDotData = function () {
+        return transportAgent ? transportAgent.get_dot_data() : "";
+    };
+
+    this.getSendSourceDotData = function (sourceIndex) {
+        return localSources[sourceIndex] ? localSources[sourceIndex].get_dot_data() : "";
+    };
+
+    this.getReceiveSourceDotData = function (sourceIndex) {
+        return remoteSources[sourceIndex] ? remoteSources[sourceIndex].get_dot_data() : "";
     };
 
     function internalAddRemoteCandidate(mediaSession, candidate, ufrag, password) {
